@@ -18,23 +18,30 @@ use crate::board::*;
 use crate::card::Card;
 use crate::containers::MoveSpec;
 
-struct AppState {
+pub struct AppState {
     boards: Vec<Board>,
 }
 
-#[tokio::main]
-async fn main() {
-    let app_state = Arc::new(Mutex::new(AppState { boards: Vec::new() }));
-
-    // build our application with a route
-    let app = Router::new()
-        .route("/board/", post(create_board).get(list_boards))
+pub fn router_with(state: Arc<Mutex<AppState>>) -> Router {
+    Router::new()
+        .route("/board", post(create_board).get(list_boards))
         .route("/board/:board_id", get(fetch_board).patch(change_board).delete(remove_board))
         .route("/board/:board_id/column", post(create_column))
         .route("/board/:board_id/column/:column_id", patch(change_column).delete(remove_column))
         .route("/board/:board_id/column/:column_id/card", post(create_card))
         .route("/board/:board_id/column/:column_id/card/:card_id", patch(change_card).delete(remove_card))
-        .layer(Extension(Arc::clone(&app_state)));
+        .layer(Extension(state))
+}
+
+pub fn app_state_empty() -> Arc<Mutex<AppState>> {
+    Arc::new(Mutex::new(AppState { boards: Vec::new() }))
+}
+
+#[tokio::main]
+async fn main() {
+
+    // build our application with a route
+    let app = router_with(app_state_empty());
 
     // run it
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
@@ -97,8 +104,7 @@ async fn create_column(
 
 async fn create_card(
     Extension(state): Extension<Arc<Mutex<AppState>>>,
-    Path(board_id): Path<usize>,
-    Path(column_id): Path<usize>,
+    Path((board_id, column_id)): Path<(usize, usize)>,
     Json(payload): Json<CreatePayload>
 ) -> StatusCode {
     let mut lstate = state.lock().unwrap();
@@ -213,8 +219,7 @@ struct ChangeBoardPayload {
 
 async fn change_column(
     Extension(state): Extension<Arc<Mutex<AppState>>>,
-    Path(board_id): Path<usize>,
-    Path(column_id): Path<usize>,
+    Path((board_id, column_id)): Path<(usize, usize)>,
     Json(payload): Json<ChangeContainedPayload>,
 ) -> StatusCode {
     let mut lstate = state.lock().unwrap();
@@ -255,9 +260,7 @@ async fn change_column(
 
 async fn change_card(
     Extension(state): Extension<Arc<Mutex<AppState>>>,
-    Path(board_id): Path<usize>,
-    Path(column_id): Path<usize>,
-    Path(card_id): Path<usize>,
+    Path((board_id, column_id, card_id)): Path<(usize, usize, usize)>,
     Json(payload): Json<ChangeContainedPayload>,
 ) -> StatusCode {
     let mut lstate = state.lock().unwrap();
@@ -319,8 +322,7 @@ async fn remove_board(
 }
 async fn remove_column(
     Extension(state): Extension<Arc<Mutex<AppState>>>,
-    Path(board_id): Path<usize>,
-    Path(column_id): Path<usize>,
+    Path((board_id, column_id)): Path<(usize, usize)>,
 ) -> StatusCode {
     let mut lstate = state.lock().unwrap();
     match lstate.boards.get_mut(board_id) {
@@ -337,9 +339,7 @@ async fn remove_column(
 
 async fn remove_card(
     Extension(state): Extension<Arc<Mutex<AppState>>>,
-    Path(board_id): Path<usize>,
-    Path(column_id): Path<usize>,
-    Path(card_id): Path<usize>,
+    Path((board_id, column_id, card_id)): Path<(usize, usize, usize)>,
 ) -> StatusCode {
     let mut lstate = state.lock().unwrap();
     match lstate.boards.get_mut(board_id) {
@@ -356,5 +356,75 @@ async fn remove_card(
                 };
         },
         None => StatusCode::NOT_FOUND
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum_test::TestServer;
+    use serde_json::json;
+    use serde_json::value::Value;
+
+    #[tokio::test]
+    async fn empty_boards() {
+        let server = TestServer::new(router_with(app_state_empty()));
+        let response =
+                server
+                    .unwrap()
+                    .get("/board")
+                    .await;
+        assert_eq!(response.json::<Value>(), json!([]));
+    }
+
+    #[tokio::test]
+    async fn full() {
+        let server = TestServer::new(router_with(app_state_empty())).unwrap();
+        assert_eq!(
+            server
+                .post("/board")
+                .json(&json!({"title": "B0"}))
+                .await
+                .status_code(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            server
+                .post("/board/0/column")
+                .json(&json!({"title": "C0"}))
+                .await
+                .status_code(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            server
+                .post("/board/0/column/0/card")
+                .json(&json!({"title": "C0"}))
+                .await
+                .status_code(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            server
+                .patch("/board/0/column/0/card/0")
+                .json(&json!({"title": "C0!"}))
+                .await
+                .status_code(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            server
+                .get("/board")
+                .await
+                .json::<Value>(),
+            json!([{"title": "B0"}])
+        );
+        assert_eq!(
+            server
+                .get("/board/0")
+                .await
+                .json::<Value>(),
+            json!({"columns": [{"cards": [{"title": "C0!"}], "title": "C0"}], "title": "B0"})
+        );
     }
 }
