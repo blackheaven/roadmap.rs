@@ -7,5 +7,5 @@ My personal Rust language learning journey
 * [x] TDD Cupcake
 * [x] TDD Mars rover
 * [x] API TODO List
-* [ ] API Kanban
+* [x] API Kanban
 * [ ] WASM Hangman
