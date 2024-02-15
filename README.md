@@ -8,4 +8,8 @@ My personal Rust language learning journey
 * [x] TDD Mars rover
 * [x] API TODO List
 * [x] API Kanban
-* [ ] WASM Hangman
+* [x] WASM Hangman
+* [ ] FFI/Tokio SQLite log pulse time
+
+* [ ] clone => `&`
+* [ ] `String` => `&str`
