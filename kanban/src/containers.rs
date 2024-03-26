@@ -25,8 +25,7 @@ impl<T: Clone> Container<T> {
         if origin >= self.items.len() {
             return false
         }
-        let element = self.items[origin].clone();
-        self.items.remove(origin);
+        let element = self.items.remove(origin);
 
         match spec {
             MoveSpec::Beginning => self.items.insert(0, element),
@@ -37,12 +36,12 @@ impl<T: Clone> Container<T> {
         return true;
     }
 
-    pub fn update_item(&mut self, origin: usize, f: impl Fn(T) -> T) -> bool {
+    pub fn update_item(&mut self, origin: usize, f: impl Fn(&T) -> T) -> bool {
         if origin >= self.items.len() {
             return false
         }
 
-        self.items[origin] = f(self.items[origin].clone());
+        self.items[origin] = f(&self.items[origin]);
         return true;
     }
 

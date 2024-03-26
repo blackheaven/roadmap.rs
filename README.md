@@ -9,7 +9,11 @@ My personal Rust language learning journey
 * [x] API TODO List
 * [x] API Kanban
 * [x] WASM Hangman
-* [ ] FFI/Tokio SQLite log pulse time
+* [x] FFI/Tokio SQLite log pulse time
+* [x] https://rocket.rs/
+* [ ] Tokio
+* [ ] RSocket
+* [ ] memcache (https://codingchallenges.substack.com/p/coding-challenge-17-memcached-server)
 
-* [ ] clone => `&`
-* [ ] `String` => `&str`
+* [x] clone => `&`
+* [x] `String` => `&str`

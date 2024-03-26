@@ -20,12 +20,14 @@ impl Food for Cookie {
     fn price_usd_cents(&self) -> u16 { 200 }
 }
 
-fn add_topping_name(base: String, topping: &str) -> String {
-    if base.contains("with") {
-        base + " and " + topping
-    } else {
-        base + " with " + topping
-    }
+fn add_topping_name<'a>(base: String, topping: &str) -> String {
+    let inter =
+        if base.contains("with") {
+            "and"
+        } else {
+            "with"
+        };
+    return format!("{} {} {}", base, inter, topping);
 }
 
 impl<T: Food> Food for Chocolate<'_, T> {

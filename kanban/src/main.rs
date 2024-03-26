@@ -139,7 +139,7 @@ async fn list_boards(
     return Json(Vec::from_iter(lstate
         .boards
         .iter()
-        .map(|board| ListBoardsItem {title: board.clone().title})));
+        .map(|board| ListBoardsItem {title: board.title.clone()})));
 }
 
 #[derive(Serialize)]
@@ -269,7 +269,7 @@ async fn change_card(
             let done =
                 board.update_item(column_id, |column| {
                     let mut new_column = column.clone();
-                    if let Some(new_title) = payload.title.clone() {
+                    if let Some(new_title) = &payload.title {
                         new_column.update_item(card_id, |card| card.rename(new_title.clone()));
                     }
 
