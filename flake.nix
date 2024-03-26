@@ -24,6 +24,7 @@
         git
         trunk
         cargo-binutils
+        cargo-watch
         lld
         wasm-pack
         wasm-bindgen-cli
