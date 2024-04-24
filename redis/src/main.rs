@@ -12,57 +12,67 @@ use tokio::{
     sync::mpsc,
 };
 
+type Backend = mpsc::UnboundedSender<(Command, mpsc::UnboundedSender<Frame>)>;
+
+fn new_backend() -> Backend {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(Command, mpsc::UnboundedSender<Frame>)>();
+    tokio::spawn(async move {
+        process_backend(&mut cmd_rx).await;
+    });
+
+    return cmd_tx;
+}
+
 #[tokio::main]
 async fn main() {
-    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(Command, mpsc::UnboundedSender<Frame>)>();
-
-    tokio::spawn(async move {
-        let mut db = HashMap::new();
-
-        while let Some((cmd, respond)) = cmd_rx.recv().await {
-            let response = match cmd {
-                Command::Ping(cmd) => match cmd.msg {
-                    None => Frame::Simple(FrameSimple::Simple("PONG".to_string())),
-                    Some(value) => Frame::Array(vec![
-                        FrameSimple::Simple("PONG".to_string()),
-                        FrameSimple::Bulk(value.clone().into()),
-                    ]),
-                },
-                Command::Set(cmd) => {
-                    db.insert(cmd.key().to_string(), cmd.value().to_vec());
-                    Frame::Simple(FrameSimple::Simple("OK".to_string()))
-                }
-                Command::Get(cmd) => {
-                    if let Some(value) = db.get(cmd.key()) {
-                        Frame::Simple(FrameSimple::Bulk(value.clone().into()))
-                    } else {
-                        Frame::Simple(FrameSimple::Null)
-                    }
-                }
-                _ => {
-                    println!("Unimplemented cmd: {:?}", cmd);
-                    Frame::Simple(FrameSimple::Error("unimplemented".to_string()))
-                }
-            };
-            respond.send(response).unwrap();
-        }
-    });
+    let backend = new_backend();
 
     // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
     loop {
         let (socket, _) = listener.accept().await.unwrap();
-        let cmd_tx = cmd_tx.clone();
+        let backend = backend.clone();
         tokio::spawn(async move {
-            process(cmd_tx, socket).await;
+            process_client(&backend, socket).await;
         });
     }
 }
 
-async fn process(
-    backend: mpsc::UnboundedSender<(Command, mpsc::UnboundedSender<Frame>)>,
-    socket: TcpStream,
+async fn process_backend(
+    cmd_rx: &mut mpsc::UnboundedReceiver<(Command, mpsc::UnboundedSender<Frame>)>,
 ) {
+    let mut db = HashMap::new();
+
+    while let Some((cmd, respond)) = cmd_rx.recv().await {
+        let response = match cmd {
+            Command::Ping(cmd) => match cmd.msg {
+                None => Frame::Simple(FrameSimple::Simple("PONG".to_string())),
+                Some(value) => Frame::Array(vec![
+                    FrameSimple::Simple("PONG".to_string()),
+                    FrameSimple::Bulk(value.clone().into()),
+                ]),
+            },
+            Command::Set(cmd) => {
+                db.insert(cmd.key().to_string(), cmd.value().to_vec());
+                Frame::Simple(FrameSimple::Simple("OK".to_string()))
+            }
+            Command::Get(cmd) => {
+                if let Some(value) = db.get(cmd.key()) {
+                    Frame::Simple(FrameSimple::Bulk(value.clone().into()))
+                } else {
+                    Frame::Simple(FrameSimple::Null)
+                }
+            }
+            _ => {
+                println!("Unimplemented cmd: {:?}", cmd);
+                Frame::Simple(FrameSimple::Error("unimplemented".to_string()))
+            }
+        };
+        respond.send(response).unwrap();
+    }
+}
+
+async fn process_client(backend: &Backend, socket: TcpStream) {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Frame>();
 
     let mut connection = Connection::new(socket);
