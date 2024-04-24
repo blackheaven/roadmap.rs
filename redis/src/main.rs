@@ -1,81 +1,77 @@
 use bytes::{Buf, Bytes, BytesMut};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::hash::{Hash, Hasher};
 use std::io;
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
-use std::sync::Arc;
 use std::time::Duration;
 use std::{fmt, str, vec};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
     net::{TcpListener, TcpStream},
-    sync::RwLock,
+    sync::mpsc,
 };
-
-type Db = Arc<Vec<RwLock<HashMap<String, Vec<u8>>>>>;
-const NUM_SHARDS: u64 = 1024;
-
-fn new_sharded_db() -> Db {
-    let mut db = Vec::with_capacity(NUM_SHARDS as usize);
-    for _ in 0..NUM_SHARDS {
-        db.push(RwLock::new(HashMap::new()));
-    }
-    Arc::new(db)
-}
-
-fn find_db(key: &str) -> usize {
-    let mut s = DefaultHasher::new();
-    key.hash(&mut s);
-    (s.finish() % NUM_SHARDS) as usize
-}
 
 #[tokio::main]
 async fn main() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(Command, mpsc::UnboundedSender<Frame>)>();
+
+    tokio::spawn(async move {
+        let mut db = HashMap::new();
+
+        while let Some((cmd, respond)) = cmd_rx.recv().await {
+            let response = match cmd {
+                Command::Ping(cmd) => match cmd.msg {
+                    None => Frame::Simple(FrameSimple::Simple("PONG".to_string())),
+                    Some(value) => Frame::Array(vec![
+                        FrameSimple::Simple("PONG".to_string()),
+                        FrameSimple::Bulk(value.clone().into()),
+                    ]),
+                },
+                Command::Set(cmd) => {
+                    db.insert(cmd.key().to_string(), cmd.value().to_vec());
+                    Frame::Simple(FrameSimple::Simple("OK".to_string()))
+                }
+                Command::Get(cmd) => {
+                    if let Some(value) = db.get(cmd.key()) {
+                        Frame::Simple(FrameSimple::Bulk(value.clone().into()))
+                    } else {
+                        Frame::Simple(FrameSimple::Null)
+                    }
+                }
+                _ => {
+                    println!("Unimplemented cmd: {:?}", cmd);
+                    Frame::Simple(FrameSimple::Error("unimplemented".to_string()))
+                }
+            };
+            respond.send(response).unwrap();
+        }
+    });
+
     // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
-    let db = new_sharded_db();
-
     loop {
         let (socket, _) = listener.accept().await.unwrap();
-        let db = db.clone();
-
+        let cmd_tx = cmd_tx.clone();
         tokio::spawn(async move {
-            process(db, socket).await;
+            process(cmd_tx, socket).await;
         });
     }
 }
 
-async fn process(db: Db, socket: TcpStream) {
+async fn process(
+    backend: mpsc::UnboundedSender<(Command, mpsc::UnboundedSender<Frame>)>,
+    socket: TcpStream,
+) {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Frame>();
+
     let mut connection = Connection::new(socket);
 
     while let Some(frame) = connection.read_frame().await.unwrap() {
         let response = match Command::from_frame(frame.clone()) {
-            Ok(Command::Ping(cmd)) => match cmd.msg {
-                None => Frame::Simple(FrameSimple::Simple("PONG".to_string())),
-                Some(value) => Frame::Array(vec![
-                    FrameSimple::Simple("PONG".to_string()),
-                    FrameSimple::Bulk(value.clone().into()),
-                ]),
-            },
-            Ok(Command::Set(cmd)) => {
-                let mut db = db[find_db(cmd.key())].write().await;
-                db.insert(cmd.key().to_string(), cmd.value().to_vec());
-                Frame::Simple(FrameSimple::Simple("OK".to_string()))
-            }
-            Ok(Command::Get(cmd)) => {
-                let db = db[find_db(cmd.key())].read().await;
-                if let Some(value) = db.get(cmd.key()) {
-                    Frame::Simple(FrameSimple::Bulk(value.clone().into()))
-                } else {
-                    Frame::Simple(FrameSimple::Null)
-                }
-            }
             Ok(cmd) => {
-                println!("Unimplemented cmd: {:?}", cmd);
-                Frame::Simple(FrameSimple::Error("unimplemented".to_string()))
+                backend.send((cmd, cmd_tx.clone())).unwrap();
+                cmd_rx.recv().await.unwrap()
             }
             Err(err) => {
                 println!("Unable to parse {:?}: {:?}", frame.clone(), err);

@@ -25,4 +25,7 @@ GET: 174825.17 requests per second, p50=0.159 msec
 SET: 72780.20 requests per second, p50=0.671 msec
 GET: 177619.89 requests per second, p50=0.167 msec
 
+# rewrite (4th iteration: drop locks, use mpsc)
+SET: 160513.64 requests per second, p50=0.175 msec
+GET: 175131.36 requests per second, p50=0.167 msec
 ```
