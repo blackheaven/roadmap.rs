@@ -1,26 +1,27 @@
-use bytes::{Buf,Bytes,BytesMut};
-use std::time::Duration;
+use bytes::{Buf, Bytes, BytesMut};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::{fmt, str, vec};
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
-use tokio::{
-    io::{AsyncReadExt,AsyncWriteExt,BufWriter},
-    net::{TcpListener, TcpStream},
-    sync::Mutex,
-};
 use std::sync::Arc;
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::time::Duration;
+use std::{fmt, str, vec};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
+    net::{TcpListener, TcpStream},
+    sync::RwLock,
+};
 
-type Db = Arc<Vec<Mutex<HashMap<String, Vec<u8>>>>>;
+type Db = Arc<Vec<RwLock<HashMap<String, Vec<u8>>>>>;
+const NUM_SHARDS: u64 = 1024;
 
-fn new_sharded_db(num_shards: usize) -> Db {
-    let mut db = Vec::with_capacity(num_shards);
-    for _ in 0..num_shards {
-        db.push(Mutex::new(HashMap::new()));
+fn new_sharded_db() -> Db {
+    let mut db = Vec::with_capacity(NUM_SHARDS as usize);
+    for _ in 0..NUM_SHARDS {
+        db.push(RwLock::new(HashMap::new()));
     }
     Arc::new(db)
 }
@@ -28,14 +29,14 @@ fn new_sharded_db(num_shards: usize) -> Db {
 fn find_db(key: &str) -> usize {
     let mut s = DefaultHasher::new();
     key.hash(&mut s);
-    (s.finish() % 256) as usize
+    (s.finish() % NUM_SHARDS) as usize
 }
 
 #[tokio::main]
 async fn main() {
     // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
-    let db = new_sharded_db(256);
+    let db = new_sharded_db();
 
     loop {
         let (socket, _) = listener.accept().await.unwrap();
@@ -52,23 +53,20 @@ async fn process(db: Db, socket: TcpStream) {
 
     while let Some(frame) = connection.read_frame().await.unwrap() {
         let response = match Command::from_frame(frame.clone()) {
-            Ok(Command::Ping(cmd)) => {
-                match cmd.msg {
-                    None => Frame::Simple(FrameSimple::Simple("PONG".to_string())),
-                    Some(value) =>
-                        Frame::Array(vec![
-                            FrameSimple::Simple("PONG".to_string()),
-                            FrameSimple::Bulk(value.clone().into())
-                        ]), 
-                }
-            }
+            Ok(Command::Ping(cmd)) => match cmd.msg {
+                None => Frame::Simple(FrameSimple::Simple("PONG".to_string())),
+                Some(value) => Frame::Array(vec![
+                    FrameSimple::Simple("PONG".to_string()),
+                    FrameSimple::Bulk(value.clone().into()),
+                ]),
+            },
             Ok(Command::Set(cmd)) => {
-                let mut db = db[find_db(cmd.key())].lock().await;
+                let mut db = db[find_db(cmd.key())].write().await;
                 db.insert(cmd.key().to_string(), cmd.value().to_vec());
                 Frame::Simple(FrameSimple::Simple("OK".to_string()))
             }
             Ok(Command::Get(cmd)) => {
-                let db = db[find_db(cmd.key())].lock().await;
+                let db = db[find_db(cmd.key())].read().await;
                 if let Some(value) = db.get(cmd.key()) {
                     Frame::Simple(FrameSimple::Bulk(value.clone().into()))
                 } else {
@@ -105,16 +103,18 @@ impl Connection {
 
     pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
         loop {
-            if let Some(frame) = self.parse_frame()? {
-                return Ok(Some(frame));
-            }
-
             if 0 == self.stream.read_buf(&mut self.buffer).await? {
                 if self.buffer.is_empty() {
                     return Ok(None);
                 } else {
+                    if let Some(frame) = self.parse_frame()? {
+                        return Ok(Some(frame));
+                    }
                     return Err("connection reset by peer".into());
                 }
+            }
+            if let Some(frame) = self.parse_frame()? {
+                return Ok(Some(frame));
             }
         }
     }
@@ -269,7 +269,7 @@ impl Frame {
 
                 Ok(Frame::Array(out))
             }
-            simple => FrameSimple::parse(simple, src).map(Frame::Simple)
+            simple => FrameSimple::parse(simple, src).map(Frame::Simple),
         }
     }
 
@@ -665,7 +665,6 @@ impl Config {
         Ok(Config { key, value })
     }
 }
-
 
 #[derive(Debug)]
 pub struct Unknown {
