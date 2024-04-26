@@ -28,4 +28,9 @@ GET: 177619.89 requests per second, p50=0.167 msec
 # rewrite (4th iteration: drop locks, use mpsc)
 SET: 160513.64 requests per second, p50=0.175 msec
 GET: 175131.36 requests per second, p50=0.167 msec
+
+# rewrite (5th iteration: extract and replicate kv store)
+SET: 161812.31 requests per second, p50=0.175 msec
+GET: 161812.31 requests per second, p50=0.175 msec
+
 ```
