@@ -1,17 +1,20 @@
+mod buffer;
 mod command_parser;
 mod error;
 use crate::error::*;
 mod frame;
 use crate::frame::*;
 mod command;
+use crate::buffer::BufferedStream;
 use crate::command::*;
-use bytes::{Buf, BytesMut};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::sync::Arc;
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
+    io::{AsyncWriteExt, BufWriter},
     net::{TcpListener, TcpStream},
     sync::mpsc,
 };
@@ -54,44 +57,23 @@ async fn process_client(backend: &Arc<Backend>, socket: TcpStream) {
 }
 
 struct Connection {
-    stream: BufWriter<TcpStream>,
-    buffer: BytesMut,
+    write_stream: BufWriter<OwnedWriteHalf>,
+    read_buffer: BufferedStream<OwnedReadHalf>,
 }
 
 impl Connection {
-    pub fn new(socket: TcpStream) -> Self {
+    pub fn new(mut socket: TcpStream) -> Self {
+        let (read, write) = socket.into_split();
         Self {
-            stream: BufWriter::new(socket),
-            buffer: BytesMut::with_capacity(1024 * 1024),
+            write_stream: BufWriter::new(write),
+            read_buffer: BufferedStream::new(read),
         }
     }
 
     pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
-        loop {
-            if 0 == self.stream.read_buf(&mut self.buffer).await? {
-                if self.buffer.is_empty() {
-                    return Ok(None);
-                } else {
-                    if let Some(frame) = self.parse_frame()? {
-                        return Ok(Some(frame));
-                    }
-                    return Err("connection reset by peer".into());
-                }
-            }
-            if let Some(frame) = self.parse_frame()? {
-                return Ok(Some(frame));
-            }
-        }
-    }
-
-    fn parse_frame(&mut self) -> Result<Option<Frame>, Error> {
-        let mut buf = io::Cursor::new(&self.buffer[..]);
-        match Frame::parse(&mut buf) {
-            Ok(frame) => {
-                let len = buf.position() as usize;
-                self.buffer.advance(len);
-                Ok(Some(frame))
-            }
+        self.read_buffer.reset().await;
+        match Frame::parse(&mut self.read_buffer).await {
+            Ok(frame) => Ok(Some(frame)),
             Err(FrameParseError::Incomplete) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -100,17 +82,17 @@ impl Connection {
     pub async fn write_frame(&mut self, frame: &Frame) -> io::Result<()> {
         match frame {
             Frame::Array(val) => {
-                self.stream.write_u8(b'*').await?;
-                write_decimal(&mut self.stream, val.len() as u64).await?;
+                self.write_stream.write_u8(b'*').await?;
+                write_decimal(&mut self.write_stream, val.len() as u64).await?;
 
                 for entry in &**val {
-                    entry.write(&mut self.stream).await?;
+                    entry.write(&mut self.write_stream).await?;
                 }
             }
-            Frame::Simple(val) => val.write(&mut self.stream).await?,
+            Frame::Simple(val) => val.write(&mut self.write_stream).await?,
         }
 
-        self.stream.flush().await
+        self.write_stream.flush().await
     }
 }
 

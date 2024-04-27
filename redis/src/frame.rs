@@ -1,13 +1,16 @@
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use std::convert::TryInto;
 use std::io;
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
 use std::{fmt, str};
+use tokio::io::{AsyncReadExt, AsyncWrite};
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
     net::TcpStream,
 };
+
+use crate::buffer::BufferedStream;
 
 #[derive(Clone, Debug)]
 pub enum Frame {
@@ -29,6 +32,7 @@ pub enum FrameParseError {
     Incomplete,
     Other(String),
 }
+
 impl From<String> for FrameParseError {
     fn from(src: String) -> FrameParseError {
         FrameParseError::Other(src.into())
@@ -53,6 +57,12 @@ impl From<TryFromIntError> for FrameParseError {
     }
 }
 
+impl From<std::io::Error> for FrameParseError {
+    fn from(src: std::io::Error) -> FrameParseError {
+        FrameParseError::Incomplete
+    }
+}
+
 impl std::error::Error for FrameParseError {}
 
 impl fmt::Display for FrameParseError {
@@ -74,20 +84,22 @@ impl Frame {
         }
     }
 
-    pub fn parse(src: &mut io::Cursor<&[u8]>) -> Result<Frame, FrameParseError> {
-        match get_u8(src)? {
+    pub async fn parse<Stream: AsyncReadExt + Unpin>(
+        buffer: &mut BufferedStream<Stream>,
+    ) -> Result<Frame, FrameParseError> {
+        match buffer.get_u8().await? {
             b'*' => {
-                let len = get_decimal(src)?.try_into()?;
+                let len = buffer.get_decimal().await?.try_into()?;
                 let mut out = Vec::with_capacity(len);
 
                 for _ in 0..len {
-                    let t = get_u8(src)?;
-                    out.push(FrameSimple::parse(t, src)?);
+                    let t = buffer.get_u8().await?;
+                    out.push(FrameSimple::parse(t, buffer).await?);
                 }
 
                 Ok(Frame::Array(out))
             }
-            simple => FrameSimple::parse(simple, src).map(Frame::Simple),
+            simple => FrameSimple::parse(simple, buffer).await.map(Frame::Simple),
         }
     }
 
@@ -109,25 +121,28 @@ impl Frame {
 }
 
 impl FrameSimple {
-    pub fn parse(t: u8, src: &mut io::Cursor<&[u8]>) -> Result<FrameSimple, FrameParseError> {
+    pub async fn parse<Stream: AsyncReadExt + Unpin>(
+        t: u8,
+        buffer: &mut BufferedStream<Stream>,
+    ) -> Result<FrameSimple, FrameParseError> {
         match t {
             b'+' => {
-                let line = get_line(src)?.to_vec();
+                let line = buffer.get_line().await?.to_vec();
                 let string = String::from_utf8(line)?;
                 Ok(FrameSimple::Simple(string))
             }
             b'-' => {
-                let line = get_line(src)?.to_vec();
+                let line = buffer.get_line().await?.to_vec();
                 let string = String::from_utf8(line)?;
                 Ok(FrameSimple::Error(string))
             }
             b':' => {
-                let n = get_decimal(src)?;
+                let n = buffer.get_decimal().await?;
                 Ok(FrameSimple::Integer(n))
             }
             b'$' => {
-                if b'-' == peek_u8(src)? {
-                    let line = get_line(src)?;
+                if b'-' == buffer.peek_u8().await? {
+                    let line = buffer.get_line().await?;
 
                     if line != b"-1" {
                         return Err("protocol error; invalid frame format".into());
@@ -136,17 +151,11 @@ impl FrameSimple {
                     Ok(FrameSimple::Null)
                 } else {
                     // Read the bulk string
-                    let len = get_decimal(src)?.try_into()?;
-                    let n = len + 2;
-
-                    if src.remaining() < n {
-                        return Err(FrameParseError::Incomplete);
-                    }
-
-                    let data = Bytes::copy_from_slice(&src.chunk()[..len]);
+                    let len = buffer.get_decimal().await?.try_into()?;
+                    let data = Bytes::copy_from_slice(buffer.take(len).await?.as_slice());
 
                     // skip that number of bytes + 2 (\r\n).
-                    skip(src, n)?;
+                    buffer.skip(2).await?;
 
                     Ok(FrameSimple::Bulk(data))
                 }
@@ -155,7 +164,7 @@ impl FrameSimple {
         }
     }
 
-    pub async fn write(&self, stream: &mut BufWriter<TcpStream>) -> io::Result<()> {
+    pub async fn write<T: AsyncWrite + Unpin>(&self, stream: &mut T) -> io::Result<()> {
         match self {
             FrameSimple::Simple(val) => {
                 stream.write_u8(b'+').await?;
@@ -188,61 +197,10 @@ impl FrameSimple {
     }
 }
 
-fn peek_u8(src: &mut io::Cursor<&[u8]>) -> Result<u8, FrameParseError> {
-    if !src.has_remaining() {
-        return Err(FrameParseError::Incomplete);
-    }
-
-    Ok(src.chunk()[0])
-}
-
-fn get_u8(src: &mut io::Cursor<&[u8]>) -> Result<u8, FrameParseError> {
-    if !src.has_remaining() {
-        return Err(FrameParseError::Incomplete);
-    }
-
-    Ok(src.get_u8())
-}
-
-fn skip(src: &mut io::Cursor<&[u8]>, n: usize) -> Result<(), FrameParseError> {
-    if src.remaining() < n {
-        return Err(FrameParseError::Incomplete);
-    }
-
-    src.advance(n);
-    Ok(())
-}
-
-/// Read a new-line terminated decimal
-fn get_decimal(src: &mut io::Cursor<&[u8]>) -> Result<u64, FrameParseError> {
-    use atoi::atoi;
-
-    let line = get_line(src)?;
-
-    atoi::<u64>(line).ok_or_else(|| "protocol error; invalid frame format".into())
-}
-
-/// Find a line
-fn get_line<'a>(src: &mut io::Cursor<&'a [u8]>) -> Result<&'a [u8], FrameParseError> {
-    // Scan the bytes directly
-    let start = src.position() as usize;
-    // Scan to the second to last byte
-    let end = src.get_ref().len() - 1;
-
-    for i in start..end {
-        if src.get_ref()[i] == b'\r' && src.get_ref()[i + 1] == b'\n' {
-            // We found a line, update the position to be *after* the \n
-            src.set_position((i + 2) as u64);
-
-            // Return the line
-            return Ok(&src.get_ref()[start..i]);
-        }
-    }
-
-    Err(FrameParseError::Incomplete)
-}
-
-pub async fn write_decimal(stream: &mut BufWriter<TcpStream>, val: u64) -> io::Result<()> {
+pub async fn write_decimal<Stream: AsyncWrite + Unpin>(
+    stream: &mut Stream,
+    val: u64,
+) -> io::Result<()> {
     use std::io::Write;
 
     // Convert the value to a string

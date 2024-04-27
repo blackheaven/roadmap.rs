@@ -33,4 +33,7 @@ GET: 175131.36 requests per second, p50=0.167 msec
 SET: 161812.31 requests per second, p50=0.175 msec
 GET: 161812.31 requests per second, p50=0.175 msec
 
+# rewrite (6th iteration: rewrite buffer read access)
+SET: 147470.88 requests per second, p50=0.191 msec
+GET: 154392.45 requests per second, p50=0.183 msec
 ```
