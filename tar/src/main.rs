@@ -70,13 +70,9 @@ fn create(args: Cli) -> io::Result<()> {
         write!(&mut block[297..328], "{}", "users")?;
 
         // commented lines above, should be write before checksum computation
-        for i in 148..155 {
-            block[i] = b' ';
-        } // The checksum is calculated by taking the sum of the unsigned byte values of the header record with the eight checksum bytes taken to be ASCII spaces
-        let checksum: u64 = block.iter().map(|n| *n as u64).sum();
-        for i in 148..155 {
-            block[i] = 0;
-        }
+
+        // The checksum is calculated by taking the sum of the unsigned byte values of the header record with the eight checksum bytes taken to be ASCII spaces
+        let checksum: u64 = 7 * (b' ' as u64) + block.iter().map(|n| *n as u64).sum::<u64>();
         write!(&mut block[148..155], "{:06o}", checksum)?; // should truncate
 
         writer.write(&block)?;
