@@ -2,19 +2,31 @@ use clap::Parser;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
+use std::io::stdout;
 use std::io::BufReader;
 
 fn main() -> io::Result<()> {
     let args = Cli::parse();
-    // let mut args = Cli::new("test/files.tar".to_string());
-    // args.bytes_per_line = 32;
-    // args.max_read_bytes = 400;
-    // args.bytes_per_group = 4;
-    // args.little_endian = true;
+    // let mut args = Cli::new("test/files.tar.hex".to_string());
+    // args.reverse = true;
+    // // args.bytes_per_line = 32;
+    // // args.max_read_bytes = 400;
+    // // args.bytes_per_group = 4;
+    // // args.little_endian = true;
+    // // args.skipped_bytes = 32;
 
+    if args.reverse {
+        reverse(args)
+    } else {
+        dump(args)
+    }
+}
+
+fn dump(args: Cli) -> io::Result<()> {
     let f = File::open(args.file)?;
     let mut reader = BufReader::with_capacity(args.bytes_per_line, f);
-    let mut offset = 0;
+    let mut offset = args.skipped_bytes;
+    reader.seek_relative(args.skipped_bytes as i64)?;
 
     loop {
         let buffer = reader.fill_buf()?;
@@ -35,7 +47,7 @@ fn main() -> io::Result<()> {
                     s + base
                 };
                 if i < n {
-                    print!("{:04x}", buffer[i]);
+                    print!("{:02x}", buffer[i]);
                 } else {
                     print!("    ");
                 }
@@ -59,6 +71,37 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn reverse(args: Cli) -> io::Result<()> {
+    let f = File::open(args.file)?;
+    let mut reader = BufReader::new(f);
+    let mut buf = String::with_capacity(4096);
+
+    loop {
+        reader.seek_relative(13)?; // 10 (hex) + 1 (':') + 2 (' ')
+        let n = reader.read_line(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+
+        stdout().write(
+            buf.split(' ')
+                .take_while(|p| !p.is_empty())
+                .flat_map(|p| {
+                    p.as_bytes().chunks(2).map(|cp| {
+                        u8::from_str_radix(&String::from_iter([cp[0] as char, cp[1] as char]), 16)
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<u8>>()
+                .as_ref(),
+        )?;
+
+        buf.clear();
+    }
+
+    Ok(())
+}
+
 #[derive(Parser)] // requires `derive` feature
 #[command(name = "xxd")]
 #[command(bin_name = "xxd")]
@@ -74,7 +117,7 @@ struct Cli {
     file: String,
     #[arg(short = 'e', default_value_t = false, help = "Little endian")]
     little_endian: bool,
-    #[arg(short = 'g', default_value_t = 1, help = "Bytes per group")]
+    #[arg(short = 'g', default_value_t = 2, help = "Bytes per group")]
     bytes_per_group: usize,
     #[arg(
         short = 'c',
@@ -82,8 +125,12 @@ struct Cli {
         help = "Displayed byte counts per line"
     )]
     bytes_per_line: usize,
+    #[arg(short = 's', default_value_t = 0, help = "Skipped bytes")]
+    skipped_bytes: usize,
     #[arg(short = 'l', default_value_t = usize::MAX, help = "Max read bytes")]
     max_read_bytes: usize,
+    #[arg(short = 'r', default_value_t = false, help = "Reverse a hex dump")]
+    reverse: bool,
 }
 
 impl Cli {
@@ -91,9 +138,11 @@ impl Cli {
         Self {
             file,
             little_endian: false,
-            bytes_per_group: 1,
+            bytes_per_group: 2,
             bytes_per_line: 16,
+            skipped_bytes: 0,
             max_read_bytes: usize::MAX,
+            reverse: false,
         }
     }
 }
