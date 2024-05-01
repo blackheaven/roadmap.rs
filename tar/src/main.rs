@@ -1,11 +1,17 @@
 use clap::Parser;
+use std::fs::DirBuilder;
 use std::fs::File;
+use std::fs::OpenOptions;
+use std::fs::Permissions;
 use std::io;
 use std::io::prelude::*;
 use std::io::stdin;
 use std::io::stdout;
 use std::io::BufReader;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
+use std::time::Duration;
+use std::time::SystemTime;
 
 fn main() -> io::Result<()> {
     let args = Cli::parse();
@@ -19,8 +25,9 @@ fn main() -> io::Result<()> {
     //         String::from("test/file3.txt"),
     //     ],
     // );
+    // let args = Cli::extract(String::from("test/files.tar"), String::from("/tmp"));
 
-    if args.inspect {
+    if args.inspect || args.extract {
         inspect(args)?
     } else if args.create {
         create(args)?
@@ -104,50 +111,85 @@ fn inspect(args: Cli) -> io::Result<()> {
         None => Box::new(BufReader::new(stdin())),
         Some(p) => Box::new(BufReader::new(File::open(p)?)),
     };
-    // let f = File::open(args.file.clone().unwrap())?;
-    // let mut reader = BufReader::new(f);
+
     let mut block = [0; 512];
-    let mut content_block = 0;
-    let mut nb = 0;
 
     loop {
         let n = reader.read(&mut block)?;
         if n == 0 {
             break;
         }
-        nb += 1;
 
-        if content_block == 0 {
-            let file_name = &block[0..99];
-            let _file_mode_octal = &block[100..107];
-            let _owner_id_octal = &block[108..115];
-            let _group_id_octal = &block[116..123];
-            let file_size_octal = &block[124..135];
-            let _last_modified_timestamp_octal = &block[136..147];
-            let _checksum = &block[148..155];
-            let _link_idicator = &block[156];
-            let _linked_file_name = &block[157..256];
+        let file_name = block[0..99]
+            .iter()
+            .take_while(|&c| (*c as u8) != 0)
+            .map(|&c| c)
+            .collect::<Vec<u8>>();
+        let file_mode = read_octal(&block[100..107]);
+        let _owner_id = read_octal(&block[108..115]);
+        let _group_id = read_octal(&block[116..123]);
+        let file_size = read_octal(&block[124..135]);
+        let last_modified_timestamp = read_octal(&block[136..147]);
+        let _checksum = &block[148..155];
+        let _link_idicator = &block[156];
+        let _linked_file_name = &block[157..256];
 
-            let s: String = match std::str::from_utf8(file_name) {
-                Ok(v) => v.chars().take_while(|&c| (c as u8) != 0).collect(),
-                Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
-            };
-            if !s.is_empty() {
-                println!("{}", s);
+        let file_name: String = match std::str::from_utf8(file_name.as_ref()) {
+            Ok(v) => String::from(v),
+            Err(e) => panic!("Invalid UTF-8 sequence: {}", e),
+        };
+        if !file_name.is_empty() {
+            print!("{}", file_name);
+
+            let content_blocks = file_size.div_ceil(512);
+            if args.extract {
+                let root = args
+                    .extract_dir
+                    .clone()
+                    .unwrap_or_else(|| String::from("."));
+                let root = Path::new(root.as_str());
+                let target_filepath = root.join(Path::new(&file_name));
+                let mut ancestors = target_filepath.ancestors();
+                ancestors.next(); // Drop filename
+                if let Some(p) = ancestors.next() {
+                    if !p.is_dir() {
+                        DirBuilder::new().recursive(true).create(p).unwrap();
+                    }
+                }
+                print!(" -> {:?}", target_filepath);
+                let mut out = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .append(false)
+                    .open(target_filepath)?;
+                let mut remaining_bytes = file_size;
+                for _ in 0..content_blocks {
+                    reader.read(&mut block)?;
+                    out.write(&block[0..remaining_bytes.min(511)])?;
+                    remaining_bytes -= remaining_bytes.min(512);
+                }
+                out.set_permissions(Permissions::from_mode(file_mode as u32))
+                    .unwrap();
+                out.set_modified(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(last_modified_timestamp as u64),
+                )
+                .unwrap();
+                out.sync_all().unwrap();
+            } else {
+                for _ in 0..content_blocks {
+                    reader.read(&mut block)?;
+                }
             }
-
-            let file_size_str = std::str::from_utf8(file_size_octal).unwrap();
-            content_block = match usize::from_str_radix(file_size_str, 8) {
-                Ok(n) => n.div_ceil(512),
-                Err(_) => 0,
-            }
-        } else {
-            content_block -= 1;
+            println!();
         }
     }
 
-    println!("{}", nb);
     Ok(())
+}
+
+fn read_octal(bytes: &[u8]) -> usize {
+    let str = std::str::from_utf8(bytes).unwrap();
+    return usize::from_str_radix(str, 8).unwrap_or(0);
 }
 
 #[derive(Parser)] // requires `derive` feature
@@ -163,12 +205,16 @@ fn inspect(args: Cli) -> io::Result<()> {
 struct Cli {
     #[arg(short = 'f', help = "Tar file to use")]
     file: Option<String>,
+    #[arg(short = 'x', default_value_t = false, help = "Extract")]
+    extract: bool,
     #[arg(short = 't', default_value_t = false, help = "Inspect")]
     inspect: bool,
     #[arg(short = 'c', default_value_t = false, help = "Create")]
     create: bool,
     #[arg(help = "Files to use")]
     files: Vec<String>,
+    #[arg(short = 'C', help = "Extract directory")]
+    extract_dir: Option<String>,
 }
 
 impl Cli {
@@ -176,16 +222,30 @@ impl Cli {
         Self {
             file: Some(file),
             inspect: true,
+            extract: false,
             create: false,
             files: vec![],
+            extract_dir: None,
+        }
+    }
+    pub fn extract(file: String, extract_dir: String) -> Self {
+        Self {
+            file: Some(file),
+            inspect: false,
+            extract: true,
+            create: false,
+            files: vec![],
+            extract_dir: Some(extract_dir),
         }
     }
     pub fn create(file: String, files: Vec<String>) -> Self {
         Self {
             file: Some(file),
             inspect: false,
+            extract: false,
             create: true,
             files,
+            extract_dir: None,
         }
     }
 }
