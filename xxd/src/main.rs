@@ -49,13 +49,13 @@ fn dump(args: Cli) -> io::Result<()> {
                 if i < n {
                     print!("{:02x}", buffer[i]);
                 } else {
-                    print!("    ");
+                    print!("  ");
                 }
             }
         }
 
         print!("  ");
-        for i in 0..args.bytes_per_line {
+        for i in 0..n {
             let c = buffer[i] as char;
             if i < n && !c.is_ascii_control() {
                 print!("{}", c);
@@ -64,7 +64,7 @@ fn dump(args: Cli) -> io::Result<()> {
             }
         }
         println!();
-        offset += args.bytes_per_line;
+        offset += n;
         reader.consume(n);
     }
 
