@@ -81,7 +81,7 @@ async fn main() {
             }
             None => {
                 let _ = frontend_socket
-                    .write_all("HTTP/1.1 502 Bad Gateway\r\n".as_bytes())
+                    .write_all("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n".as_bytes())
                     .await;
             }
         }
