@@ -1,0 +1,10 @@
+[package]
+name = "docker"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hostname = { version = "0.4.0", features = ["set"] }
+unshare = "0.7.0"
